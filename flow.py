@@ -1,4 +1,5 @@
 import logging
+import random
 import time
 
 import vision as V
@@ -28,6 +29,15 @@ def decide_mode(score04: float, score05: float):
     if best < MODE_FLOOR or (best - other) < MODE_MARGIN:
         return None
     return "signin" if score04 > score05 else "signout"
+
+
+def jitter_point(x, y, radius, ratio, rng=None):
+    """偏移幅度与按钮半径成正比：按钮小偏得少，按钮大偏得多。"""
+    r = rng if rng is not None else random
+    return (
+        int(round(x + r.uniform(-ratio, ratio) * radius)),
+        int(round(y + r.uniform(-ratio, ratio) * radius)),
+    )
 
 
 class Flow:
@@ -217,14 +227,18 @@ class Flow:
                 return "already"
             self.evidence(img, "mode_mismatch")
             raise SafetyAbort(f"unexpected mode {mode} for {expected}; no tap")
-        if self.dry_run:
-            log.info("dry-run: would tap %s button", expected)
-            return "dry"
         if self.last_button:
-            _, tx, ty = self.last_button[0], self.last_button[1], self.last_button[2]
+            _, cx, cy, r = self.last_button
+            tx, ty = jitter_point(cx, cy, r, self.cfg.tap_offset_ratio)
+            log.info("punch button center (%d,%d) r=%d -> target tap (%d,%d)", cx, cy, r, tx, ty)
         else:
-            h = self.hit(img, "T04" if expected == "signin" else "T05")
-            tx, ty = h[1], h[2]
+            tname = "T04" if expected == "signin" else "T05"
+            h = self.hit(img, tname)
+            proxy_r = max(8, self.tpl(tname).shape[1] // 4)
+            tx, ty = jitter_point(h[1], h[2], proxy_r, self.cfg.tap_offset_ratio)
+        if self.dry_run:
+            log.info("dry-run: would tap %s button at (%d,%d)", expected, tx, ty)
+            return "dry"
         self.adb.tap(tx, ty)
         log.info("tapped %s button at (%d,%d)", expected, tx, ty)
         flipped = "signout" if expected == "signin" else "signin"

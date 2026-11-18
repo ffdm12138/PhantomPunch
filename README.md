@@ -47,6 +47,7 @@ powershell -ExecutionPolicy Bypass -File setup_tasks.ps1
 | exclude_ranges | 按年的春节/国庆闭区间（每年 11 月官方公布后更新） |
 | match_threshold | 模板默认阈值 0.85；相似文字模板需单独提高（见采集指南） |
 | kill_adb_after | 结束是否 kill adb server（默认 true，零残留） |
+| tap_offset_ratio | 点击随机偏移比例（×按钮半径，默认 0.25；按钮小偏得少、大偏得多，避免机械固定点） |
 | deadline_s / device_wait_s | 单次运行预算 / 等设备上限 |
 
 ## 日常与排错

@@ -1,10 +1,11 @@
+import random
 import unittest
 
 import cv2
 import numpy as np
 
 import vision as V
-from flow import decide_mode
+from flow import decide_mode, jitter_point
 
 
 def synth():
@@ -110,6 +111,22 @@ class TestDecideMode(unittest.TestCase):
 
     def test_margin_too_small_unknown(self):
         self.assertIsNone(decide_mode(0.90, 0.85))
+
+
+class TestJitter(unittest.TestCase):
+    def test_offset_scales_with_radius(self):
+        rng = random.Random(5)
+        for _ in range(200):
+            x, y = jitter_point(500, 1200, 200, 0.25, rng)
+            self.assertLessEqual(abs(x - 500), 50)
+            self.assertLessEqual(abs(y - 1200), 50)
+        x, y = jitter_point(500, 1200, 80, 0.25, rng)
+        self.assertLessEqual(abs(x - 500), 20)
+        self.assertLessEqual(abs(y - 1200), 20)
+
+    def test_zero_ratio_is_center(self):
+        x, y = jitter_point(100, 200, 50, 0.0)
+        self.assertEqual((x, y), (100, 200))
 
 
 if __name__ == "__main__":
