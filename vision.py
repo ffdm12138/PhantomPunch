@@ -99,3 +99,48 @@ def save_png(img, path):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     if not cv2.imwrite(str(path), img):
         raise OSError(f"imwrite failed: {path}")
+
+
+def find_blue_button(img):
+    """Locate the big blue punch circle; layout/render independent. -> (score, cx, cy, r) | None"""
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, (100, 150, 120), (125, 255, 255))
+    k = np.ones((9, 9), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    h, w = img.shape[:2]
+    best = None
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area < 0.008 * w * h:
+            continue
+        peri = cv2.arcLength(c, True)
+        if peri <= 0:
+            continue
+        circ = 4 * np.pi * area / (peri * peri)
+        (cx, cy), r = cv2.minEnclosingCircle(c)
+        if r <= 0:
+            continue
+        fill = area / (np.pi * r * r)
+        d = 2 * r
+        if circ < 0.75 or fill < 0.6:
+            continue
+        if not (0.2 * w <= d <= 0.6 * w):
+            continue
+        if not (0.25 * w <= cx <= 0.75 * w and 0.30 * h <= cy <= 0.78 * h):
+            continue
+        score = circ * fill
+        if best is None or score > best[0]:
+            best = (float(score), int(cx), int(cy), int(r))
+    return best
+
+
+def match_one_scales(img, tpl, threshold, roi=None, scales=(1.0, 0.95, 1.05, 0.9, 1.1)):
+    best = None
+    for s in scales:
+        t = tpl if s == 1.0 else cv2.resize(tpl, None, fx=s, fy=s)
+        hit = match_one(img, t, threshold, roi)
+        if hit is not None and (best is None or hit[0] > best[0]):
+            best = hit
+    return best

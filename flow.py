@@ -28,6 +28,7 @@ class Flow:
         self.deadline = deadline
         self.woke = False
         self.last_evidence = None
+        self.last_button = None
         self._tpl = {}
 
     def tpl(self, name):
@@ -120,7 +121,7 @@ class Flow:
                 self.adb.back()
                 time.sleep(1.5)
                 continue
-            if self.hit(img, "T12") or self.hit(img, "T10"):
+            if self.hit(img, "T12") or self.hit(img, "T10") or V.find_blue_button(img):
                 return img
             icons = self.hits(img, "T03")
             if icons:
@@ -157,18 +158,42 @@ class Flow:
 
     def read_mode(self, img):
         self._safety(img)
+        self.last_button = V.find_blue_button(img)
         if not self.hit(img, "T10"):
             self.evidence(img, "range_anchor_missing")
             raise SafetyAbort("in-range anchor missing, cannot confirm attendance range")
-        if self.hit(img, "T04"):
+        roi = None
+        if self.last_button:
+            _, cx, cy, r = self.last_button
+            h, w = img.shape[:2]
+            pad = int(r * 1.35)
+            roi = (
+                max(0.0, (cx - pad) / w),
+                max(0.0, (cy - pad) / h),
+                min(1.0, (cx + pad) / w),
+                min(1.0, (cy + pad) / h),
+            )
+            log.info("blue button found at (%d,%d) r=%d score=%.2f", cx, cy, r, self.last_button[0])
+        if V.match_one_scales(img, self.tpl("T04"), self.specs["T04"].threshold, roi):
             return "signin"
-        if self.hit(img, "T05"):
+        if V.match_one_scales(img, self.tpl("T05"), self.specs["T05"].threshold, roi):
             return "signout"
         self.evidence(img, "mode_unknown")
         raise FlowError("cannot read punch mode")
 
     def punch_and_verify(self, img, expected):
-        mode = self.read_mode(img)
+        mode = None
+        for attempt in range(3):
+            try:
+                mode = self.read_mode(img)
+                break
+            except FlowError:
+                if attempt == 2:
+                    raise
+                log.warning("mode unreadable (attempt %d), retrying in 2s", attempt + 1)
+                time.sleep(2)
+                self.check_deadline()
+                img = self.adb.screencap()
         log.info("punch mode=%s expected=%s", mode, expected)
         if mode != expected:
             if expected == "signin" and mode == "signout":
@@ -179,9 +204,13 @@ class Flow:
         if self.dry_run:
             log.info("dry-run: would tap %s button", expected)
             return "dry"
-        h = self.hit(img, "T04" if expected == "signin" else "T05")
-        self.adb.tap(h[1], h[2])
-        log.info("tapped %s button at %s", expected, h[1:])
+        if self.last_button:
+            _, tx, ty = self.last_button[0], self.last_button[1], self.last_button[2]
+        else:
+            h = self.hit(img, "T04" if expected == "signin" else "T05")
+            tx, ty = h[1], h[2]
+        self.adb.tap(tx, ty)
+        log.info("tapped %s button at (%d,%d)", expected, tx, ty)
         flipped = "signout" if expected == "signin" else "signin"
         end = time.monotonic() + 20
         im2 = img

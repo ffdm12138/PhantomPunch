@@ -55,6 +55,34 @@ class TestVision(unittest.TestCase):
         self.assertIsNone(V.match_one(self.img, flat, 0.85))
         self.assertEqual(V.match_all(self.img, flat, 0.85), [])
 
+    def test_find_blue_button(self):
+        img = np.full((2232, 1080, 3), 40, np.uint8)
+        cv2.circle(img, (540, 1300), 230, (255, 119, 24), -1)
+        btn = V.find_blue_button(img)
+        self.assertIsNotNone(btn)
+        _, cx, cy, r = btn
+        self.assertLess(abs(cx - 540), 15)
+        self.assertLess(abs(cy - 1300), 15)
+        self.assertLess(abs(r - 230), 15)
+
+    def test_find_blue_button_absent(self):
+        img = np.full((2232, 1080, 3), 40, np.uint8)
+        self.assertIsNone(V.find_blue_button(img))
+        small = img.copy()
+        cv2.rectangle(small, (40, 300), (140, 400), (255, 119, 24), -1)
+        self.assertIsNone(V.find_blue_button(small))
+
+    def test_match_one_scales(self):
+        img = np.full((400, 300, 3), 30, np.uint8)
+        img[150:200, 120:180] = 255
+        img[165:185, 135:165] = 0
+        tpl = img[150:200, 120:180].copy()
+        shrunk = cv2.resize(tpl, None, fx=0.9, fy=0.9)
+        hit = V.match_one_scales(img, shrunk, 0.85)
+        self.assertIsNotNone(hit)
+        self.assertLess(abs(hit[1] - 150), 15)
+        self.assertLess(abs(hit[2] - 175), 15)
+
 
 if __name__ == "__main__":
     unittest.main()
