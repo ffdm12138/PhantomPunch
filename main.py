@@ -208,6 +208,38 @@ def cmd_crop(cfg, args):
     return 0
 
 
+def cmd_tour(cfg, args):
+    adb = Adb(cfg.adb_path, cfg.serial)
+    flow = make_flow(cfg, adb, dry_run=True)
+    try:
+        flow.ensure_ready()
+        adb.shell(f"am force-stop {cfg.package}")
+        time.sleep(1.5)
+        img = flow.goto_workbench()
+        log.info("TOUR: workbench reached (small tab/icon navigation exercised)")
+        icons = flow.hits(img, "T03")
+        if not icons:
+            raise FlowError("tour: attendance icon not found on workbench")
+        top = V.topmost(icons)
+        log.info("TOUR: tap attendance icon at %s", top[1:])
+        adb.tap(top[1], top[2])
+        time.sleep(2.5)
+        img2 = adb.screencap()
+        mode = flow.read_mode(img2)
+        log.info("TOUR: attendance page ok, mode=%s", mode)
+        adb.back()
+        time.sleep(2)
+        img3 = adb.screencap()
+        back_ok = bool(flow.hit(img3, "T03") or flow.hit(img3, "T02"))
+        log.info("TOUR: back to workbench=%s", back_ok)
+        if not back_ok:
+            raise FlowError("tour: back navigation failed")
+        log.info("TOUR: all navigation steps OK (zero punch taps)")
+        return 0
+    finally:
+        flow.finish()
+
+
 def cmd_selftest(cfg, args):
     specs = V.load_manifest(cfg.templates_dir)
     if not specs:
@@ -248,6 +280,7 @@ def main():
     p.add_argument("--threshold", type=float, default=0.85)
     p.add_argument("--roi", default=None, help="JSON [x1,y1,x2,y2] fractions")
     sub.add_parser("selftest")
+    sub.add_parser("tour")
     args = ap.parse_args()
     try:
         cfg = load_config(args.config)
@@ -262,6 +295,7 @@ def main():
         "capture": cmd_capture,
         "crop": cmd_crop,
         "selftest": cmd_selftest,
+        "tour": cmd_tour,
     }
     try:
         return handlers[args.cmd](cfg, args)

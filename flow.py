@@ -111,6 +111,11 @@ class Flow:
             self.check_deadline()
             img = self.adb.screencap()
             self._safety(img)
+            if self.hit(img, "T12") or V.find_blue_button(img):
+                log.info("already on attendance page; BACK to workbench")
+                self.adb.back()
+                time.sleep(1.5)
+                continue
             if self.hit(img, "T03") or self.hit(img, "T02"):
                 return img
             tab = self.hit(img, "T01")

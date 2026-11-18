@@ -35,6 +35,7 @@ copy config.example.json config.json   :: 填 adb_path / serial / 假日区间
 .venv\Scripts\python.exe main.py doctor
 :: 采模板（必做，用你自己的手机）→ 见 docs/template-capture.md
 .venv\Scripts\python.exe main.py signin --dry-run
+.venv\Scripts\python.exe main.py tour    :: 导航体检：只翻页找按钮，绝不点打卡
 powershell -ExecutionPolicy Bypass -File setup_tasks.ps1
 ```
 `setup_tasks.ps1` 里的窗口按你所在组织的**班次**调整：钉钉按打卡时间归槽，班次开始后的"上班打卡"会被记成下班——签到窗口必须卡在班次开始之前并留导航余量。
