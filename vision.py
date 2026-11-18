@@ -144,3 +144,17 @@ def match_one_scales(img, tpl, threshold, roi=None, scales=(1.0, 0.95, 1.05, 0.9
         if hit is not None and (best is None or hit[0] > best[0]):
             best = hit
     return best
+
+
+def match_all_scales(img, tpl, threshold, roi=None, scales=(1.0, 0.95, 1.05, 0.9, 1.1)):
+    merged = []
+    for s in scales:
+        t = tpl if s == 1.0 else cv2.resize(tpl, None, fx=s, fy=s)
+        for score, cx, cy in match_all(img, t, threshold, roi):
+            merged.append((score, cx, cy, t.shape[1], t.shape[0]))
+    merged.sort(key=lambda h: -h[0])
+    kept = []
+    for score, cx, cy, tw, th in merged:
+        if all(abs(cx - k[1]) >= k[3] * 0.5 or abs(cy - k[2]) >= k[4] * 0.5 for k in kept):
+            kept.append((score, cx, cy, tw, th))
+    return [(s, x, y) for s, x, y, _, _ in kept]

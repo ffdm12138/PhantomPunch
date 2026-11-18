@@ -30,12 +30,12 @@
 | T13 | 主导航不变 tab（如"千问办公"） | 钉钉主页锚点 |
 T07/T09/T11/T14 可选不采：安全由 T10 必需锚点兜底（人脸/范围外页没有 T10，必中止）。
 
-## 3. 相似文字必须测交叉分
-"上班打卡"与"下班打卡"字形相近，实测交叉分可达 0.87——默认 0.85 会互判。采完 T04/T05 后：
+## 3. 相似文字与模式判定
+"上班打卡"与"下班打卡"字形相近，交叉分可达 0.87~0.89。因此**模式判定不依赖绝对高分**：两个模板共享"打卡"二字（分数天然有底），程序取两者原始得分的相对差距——最高分 ≥0.70 且领先 ≥0.08 才判模式，否则重拍重试、仍模糊即安全中止。manifest 里的 threshold 仅用于 `selftest` 回归，不是运行时判定门槛。
+采完 T04/T05 用 `selftest` 确认自匹配 ≥0.99、交叉分明显低于自匹配即可（用下面的命令看交叉分）：
 ```bat
 .venv\Scripts\python.exe -c "import cv2,vision as V;from config import load_config;c=load_config();s=V.load_manifest(c.templates_dir);up=cv2.imread(str(c.captures_dir/'attendance.png'));print(V.match_one(up,V.load_template(s['T05']),0.0))"
 ```
-把 manifest.json 中 T04/T05 的 threshold 设为 `max(0.97, 交叉分+0.02)`。新增任何相似文字模板同理。
 
 ## 4. 回归与空跑
 ```bat

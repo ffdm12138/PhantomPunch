@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 
 import vision as V
+from flow import decide_mode
 
 
 def synth():
@@ -82,6 +83,33 @@ class TestVision(unittest.TestCase):
         self.assertIsNotNone(hit)
         self.assertLess(abs(hit[1] - 150), 15)
         self.assertLess(abs(hit[2] - 175), 15)
+
+
+    def test_match_all_scales(self):
+        img = np.full((400, 300, 3), 30, np.uint8)
+        img[150:200, 120:180] = 255
+        img[165:185, 135:165] = 0
+        tpl = img[150:200, 120:180].copy()
+        shrunk = cv2.resize(tpl, None, fx=0.9, fy=0.9)
+        hits = V.match_all_scales(img, shrunk, 0.85)
+        self.assertGreaterEqual(len(hits), 1)
+        top = V.topmost(hits)
+        self.assertLess(abs(top[1] - 150), 15)
+        self.assertLess(abs(top[2] - 175), 15)
+
+
+class TestDecideMode(unittest.TestCase):
+    def test_clear_signin(self):
+        self.assertEqual(decide_mode(1.0, 0.87), "signin")
+
+    def test_clear_signout_night_cross(self):
+        self.assertEqual(decide_mode(0.89, 1.0), "signout")
+
+    def test_low_scores_unknown(self):
+        self.assertIsNone(decide_mode(0.5, 0.52))
+
+    def test_margin_too_small_unknown(self):
+        self.assertIsNone(decide_mode(0.90, 0.85))
 
 
 if __name__ == "__main__":

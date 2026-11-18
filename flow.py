@@ -18,6 +18,18 @@ class EnvError(Exception):
     pass
 
 
+MODE_FLOOR = 0.70
+MODE_MARGIN = 0.08
+
+
+def decide_mode(score04: float, score05: float):
+    """共享"打卡"字保证底线分；靠 上/下 的相对差距判模式，不依赖绝对高分。"""
+    best, other = max(score04, score05), min(score04, score05)
+    if best < MODE_FLOOR or (best - other) < MODE_MARGIN:
+        return None
+    return "signin" if score04 > score05 else "signout"
+
+
 class Flow:
     def __init__(self, adb, specs, cfg, dry_run, evidence_dir, deadline):
         self.adb = adb
@@ -40,13 +52,13 @@ class Flow:
         spec = self.specs.get(name)
         if spec is None:
             return None
-        return V.match_one(img, self.tpl(name), spec.threshold, spec.roi)
+        return V.match_one_scales(img, self.tpl(name), spec.threshold, spec.roi)
 
     def hits(self, img, name):
         spec = self.specs.get(name)
         if spec is None:
             return []
-        return V.match_all(img, self.tpl(name), spec.threshold, spec.roi)
+        return V.match_all_scales(img, self.tpl(name), spec.threshold, spec.roi)
 
     def check_deadline(self):
         if time.monotonic() > self.deadline:
@@ -174,12 +186,16 @@ class Flow:
                 min(1.0, (cy + pad) / h),
             )
             log.info("blue button found at (%d,%d) r=%d score=%.2f", cx, cy, r, self.last_button[0])
-        if V.match_one_scales(img, self.tpl("T04"), self.specs["T04"].threshold, roi):
-            return "signin"
-        if V.match_one_scales(img, self.tpl("T05"), self.specs["T05"].threshold, roi):
-            return "signout"
+        scores = {}
+        for name in ("T04", "T05"):
+            hit = V.match_one_scales(img, self.tpl(name), 0.0, roi)
+            scores[name] = hit[0] if hit else 0.0
+        log.info("mode scores T04=%.3f T05=%.3f", scores["T04"], scores["T05"])
+        mode = decide_mode(scores["T04"], scores["T05"])
+        if mode:
+            return mode
         self.evidence(img, "mode_unknown")
-        raise FlowError("cannot read punch mode")
+        raise FlowError(f"punch mode ambiguous (T04={scores['T04']:.2f} T05={scores['T05']:.2f})")
 
     def punch_and_verify(self, img, expected):
         mode = None
