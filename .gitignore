@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+logs/
+records/
+assets/
+state.json
+state.lock
+*.tmp
+dist/
+config.json
