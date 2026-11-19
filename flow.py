@@ -247,25 +247,15 @@ class Flow:
         self.adb.tap(tx, ty)
         log.info("tapped %s button at (%d,%d)", expected, tx, ty)
         flipped = "signout" if expected == "signin" else "signin"
-        end = time.monotonic() + 20
+        end = time.monotonic() + 25
         im2 = img
         while time.monotonic() < end:
             time.sleep(1.5)
             self.check_deadline()
             im2 = self.adb.screencap()
-            if self.hit(im2, "T06"):
-                self.evidence(im2, f"success_{expected}")
-                return "ok"
-            close = self.hit(im2, "T07")
-            if close:
-                self.adb.tap(close[1], close[2])
+            if self.hit(im2, "T07") or self.hit(im2, "T06"):
                 time.sleep(1.0)
                 im2 = self.adb.screencap()
-            if self.hit(im2, "T06"):
-                self.evidence(im2, f"success_{expected}")
-                return "ok"
-            tapped = "T04" if expected == "signin" else "T05"
-            if not self.hit(im2, tapped) and self.hit(im2, "T12"):
                 self.evidence(im2, f"success_{expected}")
                 return "ok"
             try:
