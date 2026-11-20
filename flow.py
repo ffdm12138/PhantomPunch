@@ -183,12 +183,26 @@ class Flow:
             self.evidence(img, "nav_fail")
         raise FlowError("navigation to attendance page failed")
 
-    def read_mode(self, img):
+    def read_mode(self, img, anchor_wait=0.0):
         self._safety(img)
+        end = time.monotonic() + anchor_wait
+        while not self.hit(img, "T10"):
+            if time.monotonic() >= end:
+                self.evidence(img, "range_anchor_missing")
+                raise SafetyAbort("in-range anchor missing, cannot confirm attendance range")
+            log.info("attendance range not settled yet (locating?); waiting up to %.0fs", end - time.monotonic())
+            time.sleep(2)
+            self.check_deadline()
+            img = self.adb.screencap()
+            self._safety(img)
+            popup = self.hit(img, "T08") or self.hit(img, "T09")
+            if popup:
+                log.info("popup dismissed during range wait at %s", popup[1:])
+                self.adb.tap(popup[1], popup[2])
+                time.sleep(1.5)
+                img = self.adb.screencap()
+                self._safety(img)
         self.last_button = V.find_blue_button(img)
-        if not self.hit(img, "T10"):
-            self.evidence(img, "range_anchor_missing")
-            raise SafetyAbort("in-range anchor missing, cannot confirm attendance range")
         roi = None
         if self.last_button:
             _, cx, cy, r = self.last_button
@@ -216,7 +230,8 @@ class Flow:
         mode = None
         for attempt in range(3):
             try:
-                mode = self.read_mode(img)
+                wait = self.cfg.range_wait_s if attempt == 0 else 0.0
+                mode = self.read_mode(img, anchor_wait=wait)
                 break
             except FlowError:
                 if attempt == 2:

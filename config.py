@@ -24,6 +24,7 @@ class Config:
     kill_adb_after: bool
     log_retention_days: int
     tap_offset_ratio: float = 0.25
+    range_wait_s: float = 45.0
     templates_dir: Path = field(default_factory=lambda: ROOT / "assets" / "templates")
     captures_dir: Path = field(default_factory=lambda: ROOT / "assets" / "captures")
     logs_dir: Path = field(default_factory=lambda: ROOT / "logs")
@@ -55,6 +56,7 @@ def load_config(path=None) -> Config:
             kill_adb_after=bool(raw["kill_adb_after"]),
             log_retention_days=int(raw["log_retention_days"]),
             tap_offset_ratio=float(raw.get("tap_offset_ratio", 0.25)),
+            range_wait_s=float(raw.get("range_wait_s", 45.0)),
         )
     except (KeyError, ValueError, TypeError) as e:
         raise ConfigError(f"config invalid: {e}") from e
@@ -66,6 +68,8 @@ def load_config(path=None) -> Config:
         raise ConfigError("probability out of range")
     if not (0 <= cfg.tap_offset_ratio <= 0.5):
         raise ConfigError("tap_offset_ratio out of range 0..0.5")
+    if not (0 <= cfg.range_wait_s <= 180):
+        raise ConfigError("range_wait_s out of range 0..180")
     for ranges in cfg.exclude_ranges.values():
         for a, b in ranges:
             if a > b:

@@ -15,5 +15,6 @@
   "device_wait_s": 60,
   "kill_adb_after": true,
   "log_retention_days": 30,
-  "tap_offset_ratio": 0.25
+  "tap_offset_ratio": 0.25,
+  "range_wait_s": 45
 }
