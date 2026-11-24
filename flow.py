@@ -183,7 +183,7 @@ class Flow:
             self.evidence(img, "nav_fail")
         raise FlowError("navigation to attendance page failed")
 
-    def read_mode(self, img, anchor_wait=0.0):
+    def locate_button(self, img, anchor_wait=0.0):
         self._safety(img)
         end = time.monotonic() + anchor_wait
         while not self.hit(img, "T10"):
@@ -219,7 +219,11 @@ class Flow:
         for name in ("T04", "T05"):
             hit = V.match_one_scales(img, self.tpl(name), 0.0, roi)
             scores[name] = hit[0] if hit else 0.0
-        log.info("mode scores T04=%.3f T05=%.3f", scores["T04"], scores["T05"])
+        log.info("mode scores T04=%.3f T05=%.3f (informational)", scores["T04"], scores["T05"])
+        return img, scores
+
+    def read_mode(self, img, anchor_wait=0.0):
+        img, scores = self.locate_button(img, anchor_wait)
         mode = decide_mode(scores["T04"], scores["T05"])
         if mode:
             return mode
@@ -227,33 +231,32 @@ class Flow:
         raise FlowError(f"punch mode ambiguous (T04={scores['T04']:.2f} T05={scores['T05']:.2f})")
 
     def punch_and_verify(self, img, expected):
-        mode = None
-        for attempt in range(3):
-            try:
-                wait = self.cfg.range_wait_s if attempt == 0 else 0.0
-                mode = self.read_mode(img, anchor_wait=wait)
+        """只按时间窗口打卡：上下班文案仅记日志，不作为点击门槛。"""
+        scores = None
+        located = False
+        for attempt in range(2):
+            wait = self.cfg.range_wait_s if attempt == 0 else 0.0
+            img, scores = self.locate_button(img, anchor_wait=wait)
+            if self.last_button or max(scores["T04"], scores["T05"]) >= 0.60:
+                located = True
                 break
-            except FlowError:
-                if attempt == 2:
-                    raise
-                log.warning("mode unreadable (attempt %d), retrying in 2s", attempt + 1)
+            self.evidence(img, "button_missing")
+            if attempt == 0:
+                log.warning("punch button not found; retrying in 2s")
                 time.sleep(2)
                 self.check_deadline()
                 img = self.adb.screencap()
-        log.info("punch mode=%s expected=%s", mode, expected)
-        if mode != expected:
-            if expected == "signin" and mode == "signout":
-                log.info("already signed in manually; no tap")
-                return "already"
-            self.evidence(img, "mode_mismatch")
-            raise SafetyAbort(f"unexpected mode {mode} for {expected}; no tap")
+        if not located:
+            raise FlowError("punch button not located")
+        mode = decide_mode(scores["T04"], scores["T05"])
+        log.info("punch window=%s observed label=%s (display is not a gate)", expected, mode or "ambiguous")
         if self.last_button:
             _, cx, cy, r = self.last_button
             tx, ty = jitter_point(cx, cy, r, self.cfg.tap_offset_ratio)
             log.info("punch button center (%d,%d) r=%d -> target tap (%d,%d)", cx, cy, r, tx, ty)
         else:
-            tname = "T04" if expected == "signin" else "T05"
-            h = self.hit(img, tname)
+            tname = "T04" if scores["T04"] >= scores["T05"] else "T05"
+            h = V.match_one_scales(img, self.tpl(tname), 0.0, None)
             proxy_r = max(8, self.tpl(tname).shape[1] // 4)
             tx, ty = jitter_point(h[1], h[2], proxy_r, self.cfg.tap_offset_ratio)
         if self.dry_run:
@@ -261,7 +264,6 @@ class Flow:
             return "dry"
         self.adb.tap(tx, ty)
         log.info("tapped %s button at (%d,%d)", expected, tx, ty)
-        flipped = "signout" if expected == "signin" else "signin"
         end = time.monotonic() + 25
         im2 = img
         while time.monotonic() < end:
@@ -271,13 +273,6 @@ class Flow:
             if self.hit(im2, "T07") or self.hit(im2, "T06"):
                 time.sleep(1.0)
                 im2 = self.adb.screencap()
-                self.evidence(im2, f"success_{expected}")
-                return "ok"
-            try:
-                m = self.read_mode(im2)
-            except (FlowError, SafetyAbort):
-                m = None
-            if m == flipped:
                 self.evidence(im2, f"success_{expected}")
                 return "ok"
         self.evidence(im2, f"verify_timeout_{expected}")

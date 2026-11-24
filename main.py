@@ -15,7 +15,7 @@ from adb_client import Adb, AdbError
 from config import ConfigError, ROOT, load_config
 from flow import EnvError, Flow, FlowError, SafetyAbort
 
-log = logging.getLogger("phantompunch")
+log = logging.getLogger("autosign")
 
 
 def setup_logging(cfg):
@@ -71,7 +71,7 @@ def cmd_signin(cfg, args):
             if not args.dry_run:
                 st.signin_done = True
                 st.signin_at = ST.now_iso()
-                st.signin_source = {"already": "already", "dry": "dry"}.get(result, "auto")
+                st.signin_source = "auto"
                 ST.save_atomic(cfg.state_path, st)
                 ST.append_record(cfg.records_path, {
                     "日期": st.date, "类型": "上班", "打卡时间": st.signin_at,
@@ -262,7 +262,7 @@ def cmd_selftest(cfg, args):
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="phantom-punch")
+    ap = argparse.ArgumentParser(prog="autosign")
     ap.add_argument("--config", default=None)
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in ("signin", "signout"):
