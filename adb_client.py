@@ -23,7 +23,10 @@ class Adb:
 
     def _run(self, args, timeout=None, with_serial=True):
         cmd = [self.adb_path] + (["-s", self.serial] if with_serial else []) + list(args)
-        return subprocess.run(cmd, capture_output=True, timeout=timeout or self.timeout)
+        try:
+            return subprocess.run(cmd, capture_output=True, timeout=timeout or self.timeout)
+        except (subprocess.TimeoutExpired, OSError) as e:
+            raise AdbError(f"adb command failed ({' '.join(args)}): {e}") from e
 
     def device_state(self) -> str:
         p = self._run(["devices"], with_serial=False)
@@ -50,19 +53,30 @@ class Adb:
 
     def shell(self, cmd: str) -> str:
         p = self._run(["shell", cmd])
-        return p.stdout.decode("utf-8", errors="replace")
+        out = p.stdout.decode("utf-8", errors="replace")
+        if p.returncode != 0:
+            err = p.stderr.decode("utf-8", errors="replace").strip()
+            low = err.lower()
+            if not out.strip() and any(k in low for k in ("not found", "offline", "no devices", "closed", "error:")):
+                raise AdbError(f"adb shell failed ({cmd}): {err[:200]}")
+        return out
 
     def screencap(self) -> np.ndarray:
-        p = None
-        for _ in range(2):
-            p = self._run(["exec-out", "screencap", "-p"], timeout=25)
-            buf = p.stdout
-            if buf[:8] == PNG_MAGIC:
-                img = cv2.imdecode(np.frombuffer(buf, np.uint8), cv2.IMREAD_COLOR)
-                if img is not None:
-                    return img
-        err = p.stderr.decode(errors="replace")[:200] if p is not None else ""
-        raise AdbError(f"screencap failed: {err}")
+        last_err = ""
+        for attempt in range(2):
+            try:
+                p = self._run(["exec-out", "screencap", "-p"], timeout=25)
+                buf = p.stdout
+                if buf[:8] == PNG_MAGIC:
+                    img = cv2.imdecode(np.frombuffer(buf, np.uint8), cv2.IMREAD_COLOR)
+                    if img is not None:
+                        return img
+                last_err = p.stderr.decode(errors="replace")[:200]
+            except AdbError as e:
+                last_err = str(e)
+            if attempt == 0:
+                time.sleep(0.5)
+        raise AdbError(f"screencap failed: {last_err}")
 
     def tap(self, x, y):
         self.shell(f"input tap {int(x)} {int(y)}")
@@ -116,4 +130,7 @@ class Adb:
         return pkg in self.shell(f"pm list packages {pkg}")
 
     def kill_server(self):
-        subprocess.run([self.adb_path, "kill-server"], capture_output=True, timeout=15)
+        try:
+            subprocess.run([self.adb_path, "kill-server"], capture_output=True, timeout=15)
+        except (subprocess.TimeoutExpired, OSError) as e:
+            log.warning("adb kill-server error: %s", e)

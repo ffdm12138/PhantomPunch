@@ -40,7 +40,8 @@ def load(path: Path):
 
 def save_atomic(path: Path, st: DayState):
     path = Path(path)
-    tmp = path.with_suffix(".tmp")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(asdict(st), ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, path)
 
@@ -79,7 +80,7 @@ def acquire_lock(path: Path, stale_s: int = 600):
             if age > stale_s and attempt == 0:
                 path.unlink(missing_ok=True)
                 continue
-            yield None
+            yield False
             return
     try:
         yield owned

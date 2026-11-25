@@ -53,14 +53,13 @@ def _roi_crop(g, roi):
     if not roi:
         return g, 0, 0
     h, w = g.shape[:2]
-    x1, y1, x2, y2 = (int(v * d) for v, d in zip(roi, (w, h, w, h)))
+    x1, y1, x2, y2 = (max(0, min(d, int(v * d))) for v, d in zip(roi, (w, h, w, h)))
     return g[y1:y2, x1:x2], x1, y1
 
 
-def match_one(img, tpl, threshold, roi=None):
-    g, ox, oy = _roi_crop(_gray(img), roi)
+def _match_one_gray(g, ox, oy, tpl, threshold):
     t = _gray(tpl)
-    if t.shape[0] > g.shape[0] or t.shape[1] > g.shape[1]:
+    if min(t.shape[:2]) < 1 or t.shape[0] > g.shape[0] or t.shape[1] > g.shape[1]:
         return None
     if float(t.std()) < 1e-6:
         return None
@@ -71,10 +70,9 @@ def match_one(img, tpl, threshold, roi=None):
     return None
 
 
-def match_all(img, tpl, threshold, roi=None):
-    g, ox, oy = _roi_crop(_gray(img), roi)
+def _match_all_gray(g, ox, oy, tpl, threshold):
     t = _gray(tpl)
-    if t.shape[0] > g.shape[0] or t.shape[1] > g.shape[1]:
+    if min(t.shape[:2]) < 1 or t.shape[0] > g.shape[0] or t.shape[1] > g.shape[1]:
         return []
     if float(t.std()) < 1e-6:
         return []
@@ -89,6 +87,16 @@ def match_all(img, tpl, threshold, roi=None):
         if all(abs(h[1] - k[1]) >= t.shape[1] / 2 or abs(h[2] - k[2]) >= t.shape[0] / 2 for k in kept):
             kept.append(h)
     return kept
+
+
+def match_one(img, tpl, threshold, roi=None):
+    g, ox, oy = _roi_crop(_gray(img), roi)
+    return _match_one_gray(g, ox, oy, tpl, threshold)
+
+
+def match_all(img, tpl, threshold, roi=None):
+    g, ox, oy = _roi_crop(_gray(img), roi)
+    return _match_all_gray(g, ox, oy, tpl, threshold)
 
 
 def topmost(hits):
@@ -137,20 +145,24 @@ def find_blue_button(img):
 
 
 def match_one_scales(img, tpl, threshold, roi=None, scales=(1.0, 0.95, 1.05, 0.9, 1.1)):
+    g, ox, oy = _roi_crop(_gray(img), roi)
+    tgray = _gray(tpl)
     best = None
     for s in scales:
-        t = tpl if s == 1.0 else cv2.resize(tpl, None, fx=s, fy=s)
-        hit = match_one(img, t, threshold, roi)
+        t = tgray if s == 1.0 else cv2.resize(tgray, None, fx=s, fy=s)
+        hit = _match_one_gray(g, ox, oy, t, threshold)
         if hit is not None and (best is None or hit[0] > best[0]):
             best = hit
     return best
 
 
 def match_all_scales(img, tpl, threshold, roi=None, scales=(1.0, 0.95, 1.05, 0.9, 1.1)):
+    g, ox, oy = _roi_crop(_gray(img), roi)
+    tgray = _gray(tpl)
     merged = []
     for s in scales:
-        t = tpl if s == 1.0 else cv2.resize(tpl, None, fx=s, fy=s)
-        for score, cx, cy in match_all(img, t, threshold, roi):
+        t = tgray if s == 1.0 else cv2.resize(tgray, None, fx=s, fy=s)
+        for score, cx, cy in _match_all_gray(g, ox, oy, t, threshold):
             merged.append((score, cx, cy, t.shape[1], t.shape[0]))
     merged.sort(key=lambda h: -h[0])
     kept = []

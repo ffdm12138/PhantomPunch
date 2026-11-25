@@ -51,6 +51,7 @@ powershell -ExecutionPolicy Bypass -File setup_tasks.ps1
 | kill_adb_after | 结束是否 kill adb server（默认 true，零残留） |
 | tap_offset_ratio | 点击随机偏移比例（×按钮半径，默认 0.25；按钮小偏得少、大偏得多，避免机械固定点） |
 | range_wait_s | 等待"已进入考勤范围"锚点的上限秒数（默认 45；页面还在"定位中"时等待而非直接中止） |
+| settle_s | 定位锚点后确认按钮坐标稳定的复核间隔秒数（默认 1.5；防止卡片延迟渲染导致按钮位置下移点偏） |
 | deadline_s / device_wait_s | 单次运行预算 / 等设备上限 |
 
 ## 日常与排错

@@ -25,6 +25,7 @@ class Config:
     log_retention_days: int
     tap_offset_ratio: float = 0.25
     range_wait_s: float = 45.0
+    settle_s: float = 1.5
     templates_dir: Path = field(default_factory=lambda: ROOT / "assets" / "templates")
     captures_dir: Path = field(default_factory=lambda: ROOT / "assets" / "captures")
     logs_dir: Path = field(default_factory=lambda: ROOT / "logs")
@@ -57,6 +58,7 @@ def load_config(path=None) -> Config:
             log_retention_days=int(raw["log_retention_days"]),
             tap_offset_ratio=float(raw.get("tap_offset_ratio", 0.25)),
             range_wait_s=float(raw.get("range_wait_s", 45.0)),
+            settle_s=float(raw.get("settle_s", 1.5)),
         )
     except (KeyError, ValueError, TypeError) as e:
         raise ConfigError(f"config invalid: {e}") from e
@@ -66,10 +68,16 @@ def load_config(path=None) -> Config:
         raise ConfigError("serial empty")
     if not (0 <= cfg.probability_num <= cfg.probability_den) or cfg.probability_den <= 0:
         raise ConfigError("probability out of range")
+    if not (0 < cfg.match_threshold <= 1.0):
+        raise ConfigError("match_threshold out of range 0..1")
+    if cfg.deadline_s <= 0 or cfg.device_wait_s < 0 or cfg.log_retention_days < 0:
+        raise ConfigError("timeout/retention must be positive/non-negative")
     if not (0 <= cfg.tap_offset_ratio <= 0.5):
         raise ConfigError("tap_offset_ratio out of range 0..0.5")
     if not (0 <= cfg.range_wait_s <= 180):
         raise ConfigError("range_wait_s out of range 0..180")
+    if not (0 <= cfg.settle_s <= 10):
+        raise ConfigError("settle_s out of range 0..10")
     for ranges in cfg.exclude_ranges.values():
         for a, b in ranges:
             if a > b:

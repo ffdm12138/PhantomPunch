@@ -21,6 +21,9 @@ class EnvError(Exception):
 
 MODE_FLOOR = 0.70
 MODE_MARGIN = 0.08
+SETTLE_DEFAULT_S = 1.5
+SETTLE_EXTRA_S = 10.0
+VERIFY_WAIT_S = 25.0
 
 
 def decide_mode(score04: float, score05: float):
@@ -51,6 +54,7 @@ class Flow:
         self.woke = False
         self.last_evidence = None
         self.last_button = None
+        self._last_fallback = None
         self._tpl = {}
 
     def tpl(self, name):
@@ -104,9 +108,19 @@ class Flow:
             self.evidence(img, "safety_range")
             raise SafetyAbort("out of attendance range")
 
+    def _dismiss_popup(self, img):
+        popup = self.hit(img, "T08") or self.hit(img, "T09")
+        if not popup:
+            return False
+        log.info("popup dismissed via template at %s", popup[1:])
+        self.adb.tap(popup[1], popup[2])
+        time.sleep(1.5)
+        return True
+
     def goto_workbench(self):
         self.adb.launch_app(self.cfg.package)
         time.sleep(3)
+        img = None
         for _ in range(8):
             self.check_deadline()
             img = self.adb.screencap()
@@ -124,7 +138,8 @@ class Flow:
                 time.sleep(2)
                 continue
             time.sleep(2)
-        self.evidence(img, "workbench_fail")
+        if img is not None:
+            self.evidence(img, "workbench_fail")
         raise FlowError("cannot reach workbench")
 
     def goto_attendance(self):
@@ -137,11 +152,7 @@ class Flow:
             self.check_deadline()
             img = self.adb.screencap()
             self._safety(img)
-            popup = self.hit(img, "T08") or self.hit(img, "T09")
-            if popup:
-                log.info("popup dismissed via template at %s", popup[1:])
-                self.adb.tap(popup[1], popup[2])
-                time.sleep(1.5)
+            if self._dismiss_popup(img):
                 continue
             if self.hit(img, "T06"):
                 log.info("success popup detected; BACK to dismiss")
@@ -183,29 +194,13 @@ class Flow:
             self.evidence(img, "nav_fail")
         raise FlowError("navigation to attendance page failed")
 
-    def locate_button(self, img, anchor_wait=0.0):
-        self._safety(img)
-        end = time.monotonic() + anchor_wait
-        while not self.hit(img, "T10"):
-            if time.monotonic() >= end:
-                self.evidence(img, "range_anchor_missing")
-                raise SafetyAbort("in-range anchor missing, cannot confirm attendance range")
-            log.info("attendance range not settled yet (locating?); waiting up to %.0fs", end - time.monotonic())
-            time.sleep(2)
-            self.check_deadline()
-            img = self.adb.screencap()
-            self._safety(img)
-            popup = self.hit(img, "T08") or self.hit(img, "T09")
-            if popup:
-                log.info("popup dismissed during range wait at %s", popup[1:])
-                self.adb.tap(popup[1], popup[2])
-                time.sleep(1.5)
-                img = self.adb.screencap()
-                self._safety(img)
-        self.last_button = V.find_blue_button(img)
+    def _button_anchor(self, img):
+        """定位蓝色圆钮或文字降级位置，并计算 T04/T05 参考分。"""
+        btn = V.find_blue_button(img)
+        self.last_button = btn
         roi = None
-        if self.last_button:
-            _, cx, cy, r = self.last_button
+        if btn:
+            _, cx, cy, r = btn
             h, w = img.shape[:2]
             pad = int(r * 1.35)
             roi = (
@@ -214,11 +209,90 @@ class Flow:
                 min(1.0, (cx + pad) / w),
                 min(1.0, (cy + pad) / h),
             )
-            log.info("blue button found at (%d,%d) r=%d score=%.2f", cx, cy, r, self.last_button[0])
-        scores = {}
+        scores, hits = {}, {}
         for name in ("T04", "T05"):
-            hit = V.match_one_scales(img, self.tpl(name), 0.0, roi)
-            scores[name] = hit[0] if hit else 0.0
+            spec = self.specs.get(name)
+            h_hit = V.match_one_scales(img, self.tpl(name), 0.0, roi) if spec is not None else None
+            scores[name] = h_hit[0] if h_hit else 0.0
+            hits[name] = h_hit
+        if btn:
+            self._last_fallback = None
+            return (btn[1], btn[2]), max(15, int(btn[3] * 0.08)), scores
+        best_name = "T04" if scores["T04"] >= scores["T05"] else "T05"
+        best_hit = hits[best_name]
+        if best_hit and best_hit[0] >= 0.60:
+            proxy_r = max(8, self.tpl(best_name).shape[1] // 4)
+            self._last_fallback = (best_hit[1], best_hit[2], proxy_r)
+            return (best_hit[1], best_hit[2]), 15, scores
+        self._last_fallback = None
+        return None, 15, scores
+
+    def locate_button(self, img, anchor_wait=0.0, settle_s=None):
+        """等待范围锚点与按钮位置在连续两帧间稳定后再返回，防止卡片延迟渲染导致点偏。"""
+        settle = getattr(self.cfg, "settle_s", SETTLE_DEFAULT_S) if settle_s is None else settle_s
+        need_settle = anchor_wait > 0 and settle > 0
+        end = time.monotonic() + max(0.0, anchor_wait)
+        settle_end = None
+        prev_pos = None
+        scores = {"T04": 0.0, "T05": 0.0}
+
+        while True:
+            self._safety(img)
+            if self._dismiss_popup(img):
+                prev_pos = None
+                self.check_deadline()
+                img = self.adb.screencap()
+                continue
+
+            if not self.hit(img, "T10"):
+                prev_pos = None
+                if time.monotonic() >= end:
+                    self.evidence(img, "range_anchor_missing")
+                    raise SafetyAbort("in-range anchor missing, cannot confirm attendance range")
+                log.info("attendance range not settled yet (locating?); waiting up to %.0fs", max(0.0, end - time.monotonic()))
+                time.sleep(min(2.0, max(0.2, end - time.monotonic())))
+                self.check_deadline()
+                img = self.adb.screencap()
+                continue
+
+            pos, tol, scores = self._button_anchor(img)
+            if pos is None:
+                prev_pos = None
+                if time.monotonic() >= end:
+                    break
+                log.info("in-range anchor present, punch button not ready; retrying")
+                time.sleep(min(1.5, max(0.2, end - time.monotonic())))
+                self.check_deadline()
+                img = self.adb.screencap()
+                continue
+
+            if not need_settle:
+                break
+
+            if prev_pos is not None and abs(pos[0] - prev_pos[0]) <= tol and abs(pos[1] - prev_pos[1]) <= tol:
+                log.info("attendance layout settled at %s (prev=%s tol=%d)", pos, prev_pos, tol)
+                break
+
+            now = time.monotonic()
+            if settle_end is None:
+                settle_end = max(end, now + min(SETTLE_EXTRA_S, settle * 4))
+            if prev_pos is not None:
+                log.info("attendance button shifted %s -> %s; waiting %.1fs to settle", prev_pos, pos, settle)
+            else:
+                log.info("button candidate at %s; confirming stability in %.1fs", pos, settle)
+            if now >= settle_end:
+                self.evidence(img, "layout_unstable")
+                raise FlowError("attendance layout did not settle before timeout")
+            prev_pos = pos
+            time.sleep(settle)
+            self.check_deadline()
+            img = self.adb.screencap()
+
+        if self.last_button:
+            _, cx, cy, r = self.last_button
+            log.info("blue button found at (%d,%d) r=%d score=%.2f", cx, cy, r, self.last_button[0])
+        elif self._last_fallback:
+            log.info("text fallback button found at (%d,%d) r=%d", *self._last_fallback)
         log.info("mode scores T04=%.3f T05=%.3f (informational)", scores["T04"], scores["T05"])
         return img, scores
 
@@ -232,21 +306,9 @@ class Flow:
 
     def punch_and_verify(self, img, expected):
         """只按时间窗口打卡：上下班文案仅记日志，不作为点击门槛。"""
-        scores = None
-        located = False
-        for attempt in range(2):
-            wait = self.cfg.range_wait_s if attempt == 0 else 0.0
-            img, scores = self.locate_button(img, anchor_wait=wait)
-            if self.last_button or max(scores["T04"], scores["T05"]) >= 0.60:
-                located = True
-                break
+        img, scores = self.locate_button(img, anchor_wait=self.cfg.range_wait_s)
+        if not self.last_button and not self._last_fallback:
             self.evidence(img, "button_missing")
-            if attempt == 0:
-                log.warning("punch button not found; retrying in 2s")
-                time.sleep(2)
-                self.check_deadline()
-                img = self.adb.screencap()
-        if not located:
             raise FlowError("punch button not located")
         mode = decide_mode(scores["T04"], scores["T05"])
         log.info("punch window=%s observed label=%s (display is not a gate)", expected, mode or "ambiguous")
@@ -255,35 +317,35 @@ class Flow:
             tx, ty = jitter_point(cx, cy, r, self.cfg.tap_offset_ratio)
             log.info("punch button center (%d,%d) r=%d -> target tap (%d,%d)", cx, cy, r, tx, ty)
         else:
-            tname = "T04" if scores["T04"] >= scores["T05"] else "T05"
-            h = V.match_one_scales(img, self.tpl(tname), 0.0, None)
-            proxy_r = max(8, self.tpl(tname).shape[1] // 4)
-            tx, ty = jitter_point(h[1], h[2], proxy_r, self.cfg.tap_offset_ratio)
+            cx, cy, proxy_r = self._last_fallback
+            tx, ty = jitter_point(cx, cy, proxy_r, self.cfg.tap_offset_ratio)
+            log.info("punch fallback center (%d,%d) r=%d -> target tap (%d,%d)", cx, cy, proxy_r, tx, ty)
         if self.dry_run:
             log.info("dry-run: would tap %s button at (%d,%d)", expected, tx, ty)
             return "dry"
         self.adb.tap(tx, ty)
         log.info("tapped %s button at (%d,%d)", expected, tx, ty)
-        end = time.monotonic() + 25
+        end = time.monotonic() + VERIFY_WAIT_S
         im2 = img
         while time.monotonic() < end:
             time.sleep(1.5)
             self.check_deadline()
             im2 = self.adb.screencap()
+            self._safety(im2)
             if self.hit(im2, "T07") or self.hit(im2, "T06"):
                 time.sleep(1.0)
                 im2 = self.adb.screencap()
                 self.evidence(im2, f"success_{expected}")
                 return "ok"
         self.evidence(im2, f"verify_timeout_{expected}")
-        raise FlowError(f"{expected} punch not verified within 20s")
+        raise FlowError(f"{expected} punch not verified within {int(VERIFY_WAIT_S)}s")
 
     def finish(self):
         try:
             self.adb.home()
             self.adb.shell(f"am force-stop {self.cfg.package}")
             log.info("dingtalk force-stopped (no background residue)")
-            if self.woke:
+            if self.woke and self.adb.screen_is_on() is not False:
                 self.adb.power()
                 log.info("screen restored to off")
         except Exception as e:

@@ -13,7 +13,7 @@ import state as ST
 import vision as V
 from adb_client import Adb, AdbError
 from config import ConfigError, ROOT, load_config
-from flow import EnvError, Flow, FlowError, SafetyAbort
+from flow import EnvError, Flow, FlowError, SafetyAbort, decide_mode
 
 log = logging.getLogger("autosign")
 
@@ -30,6 +30,12 @@ def setup_logging(cfg):
     sh = logging.StreamHandler()
     sh.setFormatter(fmt)
     root = logging.getLogger()
+    for h in list(root.handlers):
+        root.removeHandler(h)
+        try:
+            h.close()
+        except Exception:
+            pass
     root.setLevel(logging.INFO)
     root.addHandler(fh)
     root.addHandler(sh)
@@ -117,65 +123,73 @@ def cmd_signout(cfg, args):
 
 
 def cmd_doctor(cfg, args):
-    ok = True
+    with ST.acquire_lock(cfg.lock_path) as owned:
+        if not owned:
+            log.error("another run holds the lock")
+            return 5
+        ok = True
 
-    def check(name, good, detail=""):
-        nonlocal ok
-        ok = ok and good
-        print(f"[{'OK' if good else 'FAIL'}] {name} {detail}")
+        def check(name, good, detail=""):
+            nonlocal ok
+            ok = ok and good
+            print(f"[{'OK' if good else 'FAIL'}] {name} {detail}")
 
-    check("config", True, str(ROOT / "config.json"))
-    check("adb binary", cfg.adb_path.is_file(), str(cfg.adb_path))
-    adb = Adb(cfg.adb_path, cfg.serial)
-    st = adb.wait_online(10)
-    check("device online", st == "device", f"serial={cfg.serial} state={st}")
-    if st == "device":
-        try:
-            w, h = adb.wm_size()
-            check("wm size", True, f"{w}x{h}")
-        except AdbError as e:
-            check("wm size", False, str(e))
-        check("dingtalk installed", adb.package_installed(cfg.package), cfg.package)
-        on = adb.screen_is_on()
-        check("screen state readable", on is not None, f"on={on}")
-    off = datetime.now().astimezone().utcoffset()
-    check("timezone UTC+8", off is not None and off.total_seconds() == 8 * 3600, str(off))
-    years = {date.today().year, date.today().year + 1}
-    missing = years - set(cfg.exclude_ranges)
-    if missing:
-        print(f"[WARN] exclude years missing={sorted(missing)} (update config.json after official holiday announcement)")
-    else:
-        check("exclude years covered", True, f"years={sorted(cfg.exclude_ranges)}")
-    specs = V.load_manifest(cfg.templates_dir)
-    if not specs:
-        print("[WARN] no templates yet (phase-02 pending)")
-    else:
-        check("templates manifest", True, f"{len(specs)} templates")
-    for name, spec in specs.items():
-        check(f"template {name}", spec.path.is_file(), str(spec.path))
-    if cfg.kill_adb_after:
-        adb.kill_server()
-    return 0 if ok else 3
+        check("config", True, str(ROOT / "config.json"))
+        check("adb binary", cfg.adb_path.is_file(), str(cfg.adb_path))
+        adb = Adb(cfg.adb_path, cfg.serial)
+        st = adb.wait_online(10)
+        check("device online", st == "device", f"serial={cfg.serial} state={st}")
+        if st == "device":
+            try:
+                w, h = adb.wm_size()
+                check("wm size", True, f"{w}x{h}")
+            except AdbError as e:
+                check("wm size", False, str(e))
+            check("dingtalk installed", adb.package_installed(cfg.package), cfg.package)
+            on = adb.screen_is_on()
+            check("screen state readable", on is not None, f"on={on}")
+        off = datetime.now().astimezone().utcoffset()
+        check("timezone UTC+8", off is not None and off.total_seconds() == 8 * 3600, str(off))
+        years = {date.today().year, date.today().year + 1}
+        missing = years - set(cfg.exclude_ranges)
+        if missing:
+            print(f"[WARN] exclude years missing={sorted(missing)} (update config.json after official holiday announcement)")
+        else:
+            check("exclude years covered", True, f"years={sorted(cfg.exclude_ranges)}")
+        specs = V.load_manifest(cfg.templates_dir)
+        if not specs:
+            print("[WARN] no templates yet (phase-02 pending)")
+        else:
+            check("templates manifest", True, f"{len(specs)} templates")
+        for name, spec in specs.items():
+            check(f"template {name}", spec.path.is_file(), str(spec.path))
+        if cfg.kill_adb_after:
+            adb.kill_server()
+        return 0 if ok else 3
 
 
 def cmd_capture(cfg, args):
-    adb = Adb(cfg.adb_path, cfg.serial)
-    flow = make_flow(cfg, adb, dry_run=True)
-    try:
-        flow.ensure_ready()
-        if args.page == "home":
-            img = adb.screencap()
-        elif args.page == "workbench":
-            img = flow.goto_workbench()
-        else:
-            img = flow.goto_attendance()
-        cfg.captures_dir.mkdir(parents=True, exist_ok=True)
-        path = cfg.captures_dir / f"{args.label}.png"
-        V.save_png(img, path)
-        print(f"saved {path} shape={img.shape}")
-        return 0
-    finally:
-        flow.finish()
+    with ST.acquire_lock(cfg.lock_path) as owned:
+        if not owned:
+            log.error("another run holds the lock")
+            return 5
+        adb = Adb(cfg.adb_path, cfg.serial)
+        flow = make_flow(cfg, adb, dry_run=True)
+        try:
+            flow.ensure_ready()
+            if args.page == "home":
+                img = adb.screencap()
+            elif args.page == "workbench":
+                img = flow.goto_workbench()
+            else:
+                img = flow.goto_attendance()
+            cfg.captures_dir.mkdir(parents=True, exist_ok=True)
+            path = cfg.captures_dir / f"{args.label}.png"
+            V.save_png(img, path)
+            print(f"saved {path} shape={img.shape}")
+            return 0
+        finally:
+            flow.finish()
 
 
 def cmd_crop(cfg, args):
@@ -209,35 +223,42 @@ def cmd_crop(cfg, args):
 
 
 def cmd_tour(cfg, args):
-    adb = Adb(cfg.adb_path, cfg.serial)
-    flow = make_flow(cfg, adb, dry_run=True)
-    try:
-        flow.ensure_ready()
-        adb.shell(f"am force-stop {cfg.package}")
-        time.sleep(1.5)
-        img = flow.goto_workbench()
-        log.info("TOUR: workbench reached (small tab/icon navigation exercised)")
-        icons = flow.hits(img, "T03")
-        if not icons:
-            raise FlowError("tour: attendance icon not found on workbench")
-        top = V.topmost(icons)
-        log.info("TOUR: tap attendance icon at %s", top[1:])
-        adb.tap(top[1], top[2])
-        time.sleep(2.5)
-        img2 = adb.screencap()
-        mode = flow.read_mode(img2)
-        log.info("TOUR: attendance page ok, mode=%s", mode)
-        adb.back()
-        time.sleep(2)
-        img3 = adb.screencap()
-        back_ok = bool(flow.hit(img3, "T03") or flow.hit(img3, "T02"))
-        log.info("TOUR: back to workbench=%s", back_ok)
-        if not back_ok:
-            raise FlowError("tour: back navigation failed")
-        log.info("TOUR: all navigation steps OK (zero punch taps)")
-        return 0
-    finally:
-        flow.finish()
+    with ST.acquire_lock(cfg.lock_path) as owned:
+        if not owned:
+            log.error("another run holds the lock")
+            return 5
+        adb = Adb(cfg.adb_path, cfg.serial)
+        flow = make_flow(cfg, adb, dry_run=True)
+        try:
+            flow.ensure_ready()
+            adb.shell(f"am force-stop {cfg.package}")
+            time.sleep(1.5)
+            img = flow.goto_workbench()
+            log.info("TOUR: workbench reached (small tab/icon navigation exercised)")
+            icons = flow.hits(img, "T03")
+            if not icons:
+                raise FlowError("tour: attendance icon not found on workbench")
+            top = V.topmost(icons)
+            log.info("TOUR: tap attendance icon at %s", top[1:])
+            adb.tap(top[1], top[2])
+            time.sleep(2.5)
+            img2 = adb.screencap()
+            _, scores = flow.locate_button(img2, anchor_wait=cfg.range_wait_s)
+            if not flow.last_button and max(scores["T04"], scores["T05"]) < 0.60:
+                raise FlowError("tour: punch button not located on attendance page")
+            label = decide_mode(scores["T04"], scores["T05"]) or "ambiguous"
+            log.info("TOUR: attendance page ok, observed label=%s", label)
+            adb.back()
+            time.sleep(2)
+            img3 = adb.screencap()
+            back_ok = bool(flow.hit(img3, "T03") or flow.hit(img3, "T02"))
+            log.info("TOUR: back to workbench=%s", back_ok)
+            if not back_ok:
+                raise FlowError("tour: back navigation failed")
+            log.info("TOUR: all navigation steps OK (zero punch taps)")
+            return 0
+        finally:
+            flow.finish()
 
 
 def cmd_selftest(cfg, args):
@@ -308,6 +329,9 @@ def main():
     except EnvError as e:
         log.error("environment failure: %s", e)
         return 3
+    except Exception as e:
+        log.exception("unexpected failure: %s", e)
+        return 2
 
 
 if __name__ == "__main__":
