@@ -21,8 +21,9 @@ class EnvError(Exception):
 
 MODE_FLOOR = 0.70
 MODE_MARGIN = 0.08
-SETTLE_DEFAULT_S = 1.5
-SETTLE_EXTRA_S = 10.0
+SETTLE_HOLD_S = 5.0
+SETTLE_SAMPLE_S = 0.25
+SETTLE_CAP_EXTRA_S = 5.0
 VERIFY_WAIT_S = 25.0
 
 
@@ -94,7 +95,12 @@ class Flow:
         log.info("screen was_on=%s", was_on)
         self.adb.wake()
         time.sleep(0.8)
+        if self.adb.screen_is_on() is False:
+            log.warning("screen still off after wake; retrying once")
+            self.adb.wake()
+            time.sleep(0.8)
         w, h = self.adb.wm_size()
+        self.screen_size = (w, h)
         self.adb.swipe(w // 2, int(h * 0.85), w // 2, int(h * 0.25), 300)
         time.sleep(0.8)
         self.adb.home()
@@ -143,6 +149,8 @@ class Flow:
         raise FlowError("cannot reach workbench")
 
     def goto_attendance(self):
+        self.adb.shell(f"am force-stop {self.cfg.package}")
+        time.sleep(0.5)
         self.adb.launch_app(self.cfg.package)
         time.sleep(3)
         unknown = 0
@@ -228,24 +236,25 @@ class Flow:
         return None, 15, scores
 
     def locate_button(self, img, anchor_wait=0.0, settle_s=None):
-        """等待范围锚点与按钮位置在连续两帧间稳定后再返回，防止卡片延迟渲染导致点偏。"""
-        settle = getattr(self.cfg, "settle_s", SETTLE_DEFAULT_S) if settle_s is None else settle_s
-        need_settle = anchor_wait > 0 and settle > 0
+        """要求按钮位置在连续 settle 秒内的每次采样都落在容差内，才允许点击。"""
+        hold = getattr(self.cfg, "settle_s", SETTLE_HOLD_S) if settle_s is None else settle_s
+        need_settle = anchor_wait > 0 and hold > 0
         end = time.monotonic() + max(0.0, anchor_wait)
-        settle_end = None
-        prev_pos = None
+        stable_since = None
+        ref_pos = None
+        settle_cap = None
         scores = {"T04": 0.0, "T05": 0.0}
 
         while True:
             self._safety(img)
             if self._dismiss_popup(img):
-                prev_pos = None
+                stable_since = ref_pos = settle_cap = None
                 self.check_deadline()
                 img = self.adb.screencap()
                 continue
 
             if not self.hit(img, "T10"):
-                prev_pos = None
+                stable_since = ref_pos = settle_cap = None
                 if time.monotonic() >= end:
                     self.evidence(img, "range_anchor_missing")
                     raise SafetyAbort("in-range anchor missing, cannot confirm attendance range")
@@ -257,7 +266,7 @@ class Flow:
 
             pos, tol, scores = self._button_anchor(img)
             if pos is None:
-                prev_pos = None
+                stable_since = ref_pos = settle_cap = None
                 if time.monotonic() >= end:
                     break
                 log.info("in-range anchor present, punch button not ready; retrying")
@@ -269,22 +278,24 @@ class Flow:
             if not need_settle:
                 break
 
-            if prev_pos is not None and abs(pos[0] - prev_pos[0]) <= tol and abs(pos[1] - prev_pos[1]) <= tol:
-                log.info("attendance layout settled at %s (prev=%s tol=%d)", pos, prev_pos, tol)
+            now = time.monotonic()
+            if ref_pos is None or abs(pos[0] - ref_pos[0]) > tol or abs(pos[1] - ref_pos[1]) > tol:
+                if ref_pos is not None:
+                    log.info("attendance button moved %s -> %s; restarting %.1fs stability window", ref_pos, pos, hold)
+                else:
+                    log.info("button candidate at %s; holding stable for %.1fs", pos, hold)
+                ref_pos = pos
+                stable_since = now
+                if settle_cap is None:
+                    settle_cap = now + hold * 2 + SETTLE_CAP_EXTRA_S
+            elif now - stable_since >= hold:
+                log.info("attendance layout settled at %s (stable %.1fs, tol=%d)", pos, now - stable_since, tol)
                 break
 
-            now = time.monotonic()
-            if settle_end is None:
-                settle_end = max(end, now + min(SETTLE_EXTRA_S, settle * 4))
-            if prev_pos is not None:
-                log.info("attendance button shifted %s -> %s; waiting %.1fs to settle", prev_pos, pos, settle)
-            else:
-                log.info("button candidate at %s; confirming stability in %.1fs", pos, settle)
-            if now >= settle_end:
+            if settle_cap is not None and now >= settle_cap:
                 self.evidence(img, "layout_unstable")
                 raise FlowError("attendance layout did not settle before timeout")
-            prev_pos = pos
-            time.sleep(settle)
+            time.sleep(SETTLE_SAMPLE_S)
             self.check_deadline()
             img = self.adb.screencap()
 
@@ -304,29 +315,26 @@ class Flow:
         self.evidence(img, "mode_unknown")
         raise FlowError(f"punch mode ambiguous (T04={scores['T04']:.2f} T05={scores['T05']:.2f})")
 
-    def punch_and_verify(self, img, expected):
-        """只按时间窗口打卡：上下班文案仅记日志，不作为点击门槛。"""
-        img, scores = self.locate_button(img, anchor_wait=self.cfg.range_wait_s)
-        if not self.last_button and not self._last_fallback:
-            self.evidence(img, "button_missing")
-            raise FlowError("punch button not located")
-        mode = decide_mode(scores["T04"], scores["T05"])
-        log.info("punch window=%s observed label=%s (display is not a gate)", expected, mode or "ambiguous")
+    def _target_tap(self):
+        """根据当前锚点计算随机落点，并钳制在屏幕边界内。"""
         if self.last_button:
-            _, cx, cy, r = self.last_button
-            tx, ty = jitter_point(cx, cy, r, self.cfg.tap_offset_ratio)
-            log.info("punch button center (%d,%d) r=%d -> target tap (%d,%d)", cx, cy, r, tx, ty)
+            _, cx, cy, base_r = self.last_button
+            kind = "punch button"
         else:
-            cx, cy, proxy_r = self._last_fallback
-            tx, ty = jitter_point(cx, cy, proxy_r, self.cfg.tap_offset_ratio)
-            log.info("punch fallback center (%d,%d) r=%d -> target tap (%d,%d)", cx, cy, proxy_r, tx, ty)
-        if self.dry_run:
-            log.info("dry-run: would tap %s button at (%d,%d)", expected, tx, ty)
-            return "dry"
-        self.adb.tap(tx, ty)
-        log.info("tapped %s button at (%d,%d)", expected, tx, ty)
+            cx, cy, base_r = self._last_fallback
+            kind = "text fallback"
+        tx, ty = jitter_point(cx, cy, base_r, self.cfg.tap_offset_ratio)
+        size = getattr(self, "screen_size", None)
+        if size:
+            w, h = size
+            tx = min(max(tx, 8), w - 8)
+            ty = min(max(ty, 8), h - 8)
+        log.info("%s center (%d,%d) r=%d -> target tap (%d,%d)", kind, cx, cy, base_r, tx, ty)
+        return tx, ty
+
+    def _verify_success(self, expected):
         end = time.monotonic() + VERIFY_WAIT_S
-        im2 = img
+        im2 = None
         while time.monotonic() < end:
             time.sleep(1.5)
             self.check_deadline()
@@ -337,15 +345,54 @@ class Flow:
                 im2 = self.adb.screencap()
                 self.evidence(im2, f"success_{expected}")
                 return "ok"
-        self.evidence(im2, f"verify_timeout_{expected}")
+        if im2 is not None:
+            self.evidence(im2, f"verify_timeout_{expected}")
         raise FlowError(f"{expected} punch not verified within {int(VERIFY_WAIT_S)}s")
+
+    def punch_and_verify(self, img, expected):
+        """只按时间窗口打卡：上下班文案仅记日志，不作为点击门槛。"""
+        img, scores = self.locate_button(img, anchor_wait=self.cfg.range_wait_s)
+        if not self.last_button and not self._last_fallback:
+            self.evidence(img, "button_missing")
+            raise FlowError("punch button not located")
+        mode = decide_mode(scores["T04"], scores["T05"])
+        log.info("punch window=%s observed label=%s (display is not a gate)", expected, mode or "ambiguous")
+        tx, ty = self._target_tap()
+        if self.dry_run:
+            log.info("dry-run: would tap %s button at (%d,%d)", expected, tx, ty)
+            return "dry"
+        self.adb.tap(tx, ty)
+        log.info("tapped %s button at (%d,%d)", expected, tx, ty)
+        try:
+            return self._verify_success(expected)
+        except FlowError:
+            pass
+        late = self.adb.screencap()
+        if self.hit(late, "T07") or self.hit(late, "T06"):
+            time.sleep(1.0)
+            late = self.adb.screencap()
+            self.evidence(late, f"success_{expected}")
+            return "ok"
+        self.evidence(late, f"verify_retry_{expected}")
+        log.warning("verify timeout; re-locating for one controlled retry")
+        self.check_deadline()
+        img2, _ = self.locate_button(late, anchor_wait=min(self.cfg.range_wait_s, 10.0))
+        if self.hit(img2, "T07") or self.hit(img2, "T06"):
+            self.evidence(img2, f"success_{expected}")
+            return "ok"
+        if not self.last_button and not self._last_fallback:
+            raise FlowError(f"{expected} punch not verified; punch button gone on retry")
+        tx, ty = self._target_tap()
+        self.adb.tap(tx, ty)
+        log.info("retry: tapped %s button again at (%d,%d)", expected, tx, ty)
+        return self._verify_success(expected)
 
     def finish(self):
         try:
             self.adb.home()
             self.adb.shell(f"am force-stop {self.cfg.package}")
             log.info("dingtalk force-stopped (no background residue)")
-            if self.woke and self.adb.screen_is_on() is not False:
+            if self.woke and self.adb.screen_is_on() is True:
                 self.adb.power()
                 log.info("screen restored to off")
         except Exception as e:

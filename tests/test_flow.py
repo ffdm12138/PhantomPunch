@@ -92,7 +92,7 @@ class TestFlowSettleAndSafety(unittest.TestCase):
         self.cfg = SimpleNamespace(
             package="com.alibaba.android.rimet",
             range_wait_s=6.0,
-            settle_s=1.5,
+            settle_s=5.0,
             tap_offset_ratio=0.25,
             kill_adb_after=True,
         )
@@ -114,13 +114,15 @@ class TestFlowSettleAndSafety(unittest.TestCase):
             img[250:310, 900:960] = self.t08
         return img
 
+    def _stable_frames(self, y=1388, n=15, **kw):
+        return [self._frame(blue_y=y, has_t10=True, **kw) for _ in range(n)]
+
     def test_layout_shift_waits_for_settle_before_tap(self):
         clock = _FakeClock()
         f0 = self._frame(blue_y=994, has_t10=True)
-        f1 = self._frame(blue_y=1388, has_t10=True)
-        f2 = self._frame(blue_y=1388, has_t10=True)
-        f3 = self._frame(blue_y=None, has_t10=False, has_t07=True)
-        adb = _FakeAdb([f1, f2, f3])
+        success = self._frame(blue_y=None, has_t10=False, has_t07=True)
+        frames = self._stable_frames(1388, 15) + [success]
+        adb = _FakeAdb(frames)
         flow = F.Flow(adb, self.specs, self.cfg, dry_run=False, evidence_dir=self.ev_dir, deadline=500.0)
         with patch("flow.time.monotonic", clock.monotonic), patch("flow.time.sleep", clock.sleep):
             res = flow.punch_and_verify(f0, "signin")
@@ -130,9 +132,20 @@ class TestFlowSettleAndSafety(unittest.TestCase):
         self.assertLess(abs(tx - 539), 70)
         self.assertLess(abs(ty - 1388), 70)
 
+    def test_settle_window_lasts_five_seconds(self):
+        clock = _FakeClock()
+        t0 = clock.t
+        f0 = self._frame(blue_y=1388, has_t10=True)
+        adb = _FakeAdb(self._stable_frames(1388, 20))
+        flow = F.Flow(adb, self.specs, self.cfg, dry_run=True, evidence_dir=self.ev_dir, deadline=500.0)
+        with patch("flow.time.monotonic", clock.monotonic), patch("flow.time.sleep", clock.sleep):
+            res = flow.punch_and_verify(f0, "signin")
+        self.assertEqual(res, "dry")
+        self.assertGreaterEqual(clock.t - t0, 5.0)
+
     def test_layout_unstable_aborts_without_tap(self):
         clock = _FakeClock(step=2.0)
-        frames = [self._frame(blue_y=900 if i % 2 == 0 else 1350, has_t10=True) for i in range(10)]
+        frames = [self._frame(blue_y=900 if i % 2 == 0 else 1350, has_t10=True) for i in range(40)]
         adb = _FakeAdb(frames[1:])
         flow = F.Flow(adb, self.specs, self.cfg, dry_run=False, evidence_dir=self.ev_dir, deadline=500.0)
         with patch("flow.time.monotonic", clock.monotonic), patch("flow.time.sleep", clock.sleep):
@@ -144,10 +157,8 @@ class TestFlowSettleAndSafety(unittest.TestCase):
     def test_locating_then_shift_then_settle(self):
         clock = _FakeClock()
         f0 = self._frame(blue_y=994, has_t10=False)
-        f1 = self._frame(blue_y=994, has_t10=True)
-        f2 = self._frame(blue_y=1388, has_t10=True)
-        f3 = self._frame(blue_y=1388, has_t10=True)
-        adb = _FakeAdb([f1, f2, f3])
+        frames = [self._frame(blue_y=994, has_t10=True)] * 2 + self._stable_frames(1388, 18)
+        adb = _FakeAdb(frames)
         flow = F.Flow(adb, self.specs, self.cfg, dry_run=True, evidence_dir=self.ev_dir, deadline=500.0)
         with patch("flow.time.monotonic", clock.monotonic), patch("flow.time.sleep", clock.sleep):
             res = flow.punch_and_verify(f0, "signin")
@@ -179,10 +190,8 @@ class TestFlowSettleAndSafety(unittest.TestCase):
     def test_popup_dismissed_resets_settle(self):
         clock = _FakeClock()
         f0 = self._frame(blue_y=1388, has_t10=True)
-        f1 = self._frame(blue_y=1388, has_t10=True, has_t08=True)
-        f2 = self._frame(blue_y=1388, has_t10=True)
-        f3 = self._frame(blue_y=1388, has_t10=True)
-        adb = _FakeAdb([f1, f2, f3])
+        frames = [self._frame(blue_y=1388, has_t10=True, has_t08=True)] + self._stable_frames(1388, 18)
+        adb = _FakeAdb(frames)
         flow = F.Flow(adb, self.specs, self.cfg, dry_run=True, evidence_dir=self.ev_dir, deadline=500.0)
         with patch("flow.time.monotonic", clock.monotonic), patch("flow.time.sleep", clock.sleep):
             res = flow.punch_and_verify(f0, "signin")
@@ -191,16 +200,36 @@ class TestFlowSettleAndSafety(unittest.TestCase):
         self.assertLess(abs(adb.taps[0][0] - 930), 10)
         self.assertLess(abs(adb.taps[0][1] - 280), 10)
 
-    def test_verify_timeout_reports_25s(self):
+    def test_verify_timeout_retries_once_then_raises(self):
         clock = _FakeClock(step=5.0)
         f0 = self._frame(blue_y=1388, has_t10=True)
-        frames = [self._frame(blue_y=1388, has_t10=True) for _ in range(10)]
-        adb = _FakeAdb(frames)
+        adb = _FakeAdb(self._stable_frames(1388, 30))
         flow = F.Flow(adb, self.specs, self.cfg, dry_run=False, evidence_dir=self.ev_dir, deadline=500.0)
         with patch("flow.time.monotonic", clock.monotonic), patch("flow.time.sleep", clock.sleep):
             with self.assertRaises(F.FlowError) as ctx:
                 flow.punch_and_verify(f0, "signin")
         self.assertIn("25s", str(ctx.exception))
+        self.assertEqual(len(adb.taps), 2)
+        self.assertTrue(any("verify_retry" in p.name for p in self.ev_dir.glob("*.png")))
+
+    def test_verify_timeout_retry_succeeds(self):
+        class _RetryAdb(_FakeAdb):
+            def __init__(self, stable, success):
+                super().__init__([stable])
+                self.success = success
+
+            def screencap(self):
+                return self.success if len(self.taps) >= 2 else self.frames[0]
+
+        clock = _FakeClock()
+        stable = self._frame(blue_y=1388, has_t10=True)
+        success = self._frame(blue_y=None, has_t10=False, has_t07=True)
+        adb = _RetryAdb(stable, success)
+        flow = F.Flow(adb, self.specs, self.cfg, dry_run=False, evidence_dir=self.ev_dir, deadline=500.0)
+        with patch("flow.time.monotonic", clock.monotonic), patch("flow.time.sleep", clock.sleep):
+            res = flow.punch_and_verify(stable, "signin")
+        self.assertEqual(res, "ok")
+        self.assertEqual(len(adb.taps), 2)
 
     def test_finish_does_not_wake_already_off_screen(self):
         adb_off = _FakeAdb([], screen_on_seq=[False])
@@ -215,6 +244,12 @@ class TestFlowSettleAndSafety(unittest.TestCase):
         flow_on.woke = True
         flow_on.finish()
         self.assertEqual(adb_on.powers, 1)
+
+        adb_unknown = _FakeAdb([], screen_on_seq=[None])
+        flow_unknown = F.Flow(adb_unknown, self.specs, self.cfg, dry_run=True, evidence_dir=self.ev_dir, deadline=500.0)
+        flow_unknown.woke = True
+        flow_unknown.finish()
+        self.assertEqual(adb_unknown.powers, 0)
 
 
 if __name__ == "__main__":

@@ -46,8 +46,6 @@ class Adb:
             if st == "offline" and not reconnected:
                 self._run(["reconnect"])
                 reconnected = True
-            if st == "unauthorized":
-                return st
             time.sleep(2)
         return self.device_state()
 

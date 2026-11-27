@@ -28,6 +28,13 @@ class TestAdbClient(unittest.TestCase):
             with self.assertRaises(A.AdbError):
                 adb.shell("dumpsys power")
 
+    def test_wait_online_tolerates_transient_unauthorized(self):
+        adb = A.Adb("adb.exe", "SER123")
+        with patch.object(adb, "device_state", side_effect=["unauthorized", "device"]), patch(
+            "adb_client.time.sleep"
+        ):
+            self.assertEqual(adb.wait_online(10), "device")
+
 
 class TestConfigValidation(unittest.TestCase):
     def setUp(self):
@@ -55,17 +62,17 @@ class TestConfigValidation(unittest.TestCase):
             "log_retention_days": 30,
             "tap_offset_ratio": 0.25,
             "range_wait_s": 45,
-            "settle_s": 1.5,
+            "settle_s": 5.0,
         }
 
     def test_valid_config_loads(self):
         self.cfg_path.write_text(json.dumps(self._base_raw()), encoding="utf-8")
         cfg = C.load_config(self.cfg_path)
-        self.assertEqual(cfg.settle_s, 1.5)
+        self.assertEqual(cfg.settle_s, 5.0)
         self.assertEqual(cfg.range_wait_s, 45.0)
 
     def test_invalid_settle_or_threshold_rejected(self):
-        for key, bad in (("settle_s", -0.1), ("settle_s", 11), ("match_threshold", 0), ("deadline_s", 0)):
+        for key, bad in (("settle_s", -0.1), ("settle_s", 31), ("match_threshold", 0), ("deadline_s", 0)):
             raw = self._base_raw()
             raw[key] = bad
             self.cfg_path.write_text(json.dumps(raw), encoding="utf-8")
