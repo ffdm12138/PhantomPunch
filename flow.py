@@ -23,8 +23,8 @@ MODE_FLOOR = 0.70
 MODE_MARGIN = 0.08
 SETTLE_HOLD_S = 5.0
 SETTLE_SAMPLE_S = 0.25
-SETTLE_CAP_EXTRA_S = 5.0
-VERIFY_WAIT_S = 25.0
+VERIFY_WAIT_S = 40.0
+PROGRESS_LOG_S = 10.0
 
 
 def decide_mode(score04: float, score05: float):
@@ -127,7 +127,7 @@ class Flow:
         self.adb.launch_app(self.cfg.package)
         time.sleep(3)
         img = None
-        for _ in range(8):
+        for _ in range(12):
             self.check_deadline()
             img = self.adb.screencap()
             self._safety(img)
@@ -156,7 +156,7 @@ class Flow:
         unknown = 0
         scrolls = 0
         img = None
-        for rnd in range(12):
+        for rnd in range(20):
             self.check_deadline()
             img = self.adb.screencap()
             self._safety(img)
@@ -235,26 +235,28 @@ class Flow:
         self._last_fallback = None
         return None, 15, scores
 
-    def locate_button(self, img, anchor_wait=0.0, settle_s=None):
-        """要求按钮位置在连续 settle 秒内的每次采样都落在容差内，才允许点击。"""
+    def locate_button(self, img, anchor_wait=0.0, settle_s=None, button_wait=None):
+        """按钮位置需在连续 settle 秒内始终稳定才返回；慢设备可一直等，直到整次运行的总时限。"""
         hold = getattr(self.cfg, "settle_s", SETTLE_HOLD_S) if settle_s is None else settle_s
         need_settle = anchor_wait > 0 and hold > 0
         end = time.monotonic() + max(0.0, anchor_wait)
+        btn_end = None if button_wait is None else time.monotonic() + max(0.0, button_wait)
         stable_since = None
         ref_pos = None
-        settle_cap = None
+        settle_started = None
+        last_note = None
         scores = {"T04": 0.0, "T05": 0.0}
 
         while True:
             self._safety(img)
             if self._dismiss_popup(img):
-                stable_since = ref_pos = settle_cap = None
+                stable_since = ref_pos = None
                 self.check_deadline()
                 img = self.adb.screencap()
                 continue
 
             if not self.hit(img, "T10"):
-                stable_since = ref_pos = settle_cap = None
+                stable_since = ref_pos = None
                 if time.monotonic() >= end:
                     self.evidence(img, "range_anchor_missing")
                     raise SafetyAbort("in-range anchor missing, cannot confirm attendance range")
@@ -266,11 +268,14 @@ class Flow:
 
             pos, tol, scores = self._button_anchor(img)
             if pos is None:
-                stable_since = ref_pos = settle_cap = None
-                if time.monotonic() >= end:
+                stable_since = ref_pos = None
+                now = time.monotonic()
+                if btn_end is not None and now >= btn_end:
                     break
-                log.info("in-range anchor present, punch button not ready; retrying")
-                time.sleep(min(1.5, max(0.2, end - time.monotonic())))
+                if last_note is None or now - last_note >= PROGRESS_LOG_S:
+                    log.info("in-range anchor present, punch button not ready; continuing to wait (slow/laggy page)")
+                    last_note = now
+                time.sleep(1.5)
                 self.check_deadline()
                 img = self.adb.screencap()
                 continue
@@ -279,6 +284,9 @@ class Flow:
                 break
 
             now = time.monotonic()
+            if settle_started is None:
+                settle_started = now
+                last_note = now
             if ref_pos is None or abs(pos[0] - ref_pos[0]) > tol or abs(pos[1] - ref_pos[1]) > tol:
                 if ref_pos is not None:
                     log.info("attendance button moved %s -> %s; restarting %.1fs stability window", ref_pos, pos, hold)
@@ -286,17 +294,17 @@ class Flow:
                     log.info("button candidate at %s; holding stable for %.1fs", pos, hold)
                 ref_pos = pos
                 stable_since = now
-                if settle_cap is None:
-                    settle_cap = now + hold * 2 + SETTLE_CAP_EXTRA_S
             elif now - stable_since >= hold:
                 log.info("attendance layout settled at %s (stable %.1fs, tol=%d)", pos, now - stable_since, tol)
                 break
 
-            if settle_cap is not None and now >= settle_cap:
-                self.evidence(img, "layout_unstable")
-                raise FlowError("attendance layout did not settle before timeout")
+            if now - last_note >= PROGRESS_LOG_S:
+                log.info("layout still stabilizing (%.0fs since first candidate); continuing to wait", now - settle_started)
+                last_note = now
+            if time.monotonic() > self.deadline:
+                self.evidence(img, "settle_deadline")
+                raise FlowError("deadline exceeded while waiting for a stable layout")
             time.sleep(SETTLE_SAMPLE_S)
-            self.check_deadline()
             img = self.adb.screencap()
 
         if self.last_button:
@@ -308,7 +316,7 @@ class Flow:
         return img, scores
 
     def read_mode(self, img, anchor_wait=0.0):
-        img, scores = self.locate_button(img, anchor_wait)
+        img, scores = self.locate_button(img, anchor_wait, button_wait=20.0)
         mode = decide_mode(scores["T04"], scores["T05"])
         if mode:
             return mode
@@ -376,7 +384,7 @@ class Flow:
         self.evidence(late, f"verify_retry_{expected}")
         log.warning("verify timeout; re-locating for one controlled retry")
         self.check_deadline()
-        img2, _ = self.locate_button(late, anchor_wait=min(self.cfg.range_wait_s, 10.0))
+        img2, _ = self.locate_button(late, anchor_wait=self.cfg.range_wait_s)
         if self.hit(img2, "T07") or self.hit(img2, "T06"):
             self.evidence(img2, f"success_{expected}")
             return "ok"

@@ -61,7 +61,7 @@ class TestConfigValidation(unittest.TestCase):
             "kill_adb_after": True,
             "log_retention_days": 30,
             "tap_offset_ratio": 0.25,
-            "range_wait_s": 45,
+            "range_wait_s": 60,
             "settle_s": 5.0,
         }
 
@@ -69,7 +69,7 @@ class TestConfigValidation(unittest.TestCase):
         self.cfg_path.write_text(json.dumps(self._base_raw()), encoding="utf-8")
         cfg = C.load_config(self.cfg_path)
         self.assertEqual(cfg.settle_s, 5.0)
-        self.assertEqual(cfg.range_wait_s, 45.0)
+        self.assertEqual(cfg.range_wait_s, 60.0)
 
     def test_invalid_settle_or_threshold_rejected(self):
         for key, bad in (("settle_s", -0.1), ("settle_s", 31), ("match_threshold", 0), ("deadline_s", 0)):

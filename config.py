@@ -24,7 +24,7 @@ class Config:
     kill_adb_after: bool
     log_retention_days: int
     tap_offset_ratio: float = 0.25
-    range_wait_s: float = 45.0
+    range_wait_s: float = 60.0
     settle_s: float = 5.0
     templates_dir: Path = field(default_factory=lambda: ROOT / "assets" / "templates")
     captures_dir: Path = field(default_factory=lambda: ROOT / "assets" / "captures")
@@ -57,7 +57,7 @@ def load_config(path=None) -> Config:
             kill_adb_after=bool(raw["kill_adb_after"]),
             log_retention_days=int(raw["log_retention_days"]),
             tap_offset_ratio=float(raw.get("tap_offset_ratio", 0.25)),
-            range_wait_s=float(raw.get("range_wait_s", 45.0)),
+            range_wait_s=float(raw.get("range_wait_s", 60.0)),
             settle_s=float(raw.get("settle_s", 5.0)),
         )
     except (KeyError, ValueError, TypeError) as e:

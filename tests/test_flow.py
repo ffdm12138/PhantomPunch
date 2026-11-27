@@ -143,16 +143,27 @@ class TestFlowSettleAndSafety(unittest.TestCase):
         self.assertEqual(res, "dry")
         self.assertGreaterEqual(clock.t - t0, 5.0)
 
-    def test_layout_unstable_aborts_without_tap(self):
+    def test_layout_unstable_waits_until_deadline_without_tap(self):
         clock = _FakeClock(step=2.0)
         frames = [self._frame(blue_y=900 if i % 2 == 0 else 1350, has_t10=True) for i in range(40)]
         adb = _FakeAdb(frames[1:])
-        flow = F.Flow(adb, self.specs, self.cfg, dry_run=False, evidence_dir=self.ev_dir, deadline=500.0)
+        flow = F.Flow(adb, self.specs, self.cfg, dry_run=False, evidence_dir=self.ev_dir, deadline=120.0)
         with patch("flow.time.monotonic", clock.monotonic), patch("flow.time.sleep", clock.sleep):
             with self.assertRaises(F.FlowError):
                 flow.punch_and_verify(frames[0], "signin")
         self.assertEqual(adb.taps, [])
-        self.assertTrue(any("layout_unstable" in p.name for p in self.ev_dir.glob("*.png")))
+
+    def test_settle_waits_beyond_15s_on_slow_page_then_taps(self):
+        clock = _FakeClock(step=1.0)
+        t0 = clock.t
+        frames = [self._frame(blue_y=900 if i % 2 == 0 else 1350, has_t10=True) for i in range(20)]
+        frames += self._stable_frames(1388, 12)
+        adb = _FakeAdb(frames)
+        flow = F.Flow(adb, self.specs, self.cfg, dry_run=True, evidence_dir=self.ev_dir, deadline=500.0)
+        with patch("flow.time.monotonic", clock.monotonic), patch("flow.time.sleep", clock.sleep):
+            res = flow.punch_and_verify(frames[0], "signin")
+        self.assertEqual(res, "dry")
+        self.assertGreater(clock.t - t0, 15.0)
 
     def test_locating_then_shift_then_settle(self):
         clock = _FakeClock()
@@ -208,7 +219,7 @@ class TestFlowSettleAndSafety(unittest.TestCase):
         with patch("flow.time.monotonic", clock.monotonic), patch("flow.time.sleep", clock.sleep):
             with self.assertRaises(F.FlowError) as ctx:
                 flow.punch_and_verify(f0, "signin")
-        self.assertIn("25s", str(ctx.exception))
+        self.assertIn("40s", str(ctx.exception))
         self.assertEqual(len(adb.taps), 2)
         self.assertTrue(any("verify_retry" in p.name for p in self.ev_dir.glob("*.png")))
 
